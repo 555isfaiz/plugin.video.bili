@@ -1,7 +1,7 @@
 # -*- coding:utf-8 -*-
 import sys
 import os
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 import requests
 import json
 import qrcode
@@ -12,6 +12,7 @@ from datetime import datetime
 from functools import reduce
 from hashlib import md5
 from xbmcswift2 import Plugin, xbmc, xbmcplugin, xbmcvfs, xbmcgui, xbmcaddon
+import xbmcswift2.storage as swift_storage
 from danmaku2ass import Danmaku2ASS
 
 
@@ -19,6 +20,26 @@ try:
     xbmc.translatePath = xbmcvfs.translatePath
 except AttributeError:
     pass
+
+def _sync_storage(self):
+    # xbmcswift2 保存存储时先删除旧文件再移动, 多个插件实例同时退出时会抛出 FileNotFoundError,
+    # 导致后面的存储 (登录 cookie, 搜索历史) 没有保存. 改为每个进程用自己的临时文件, 再原子替换.
+    if self.flag == 'r':
+        return
+    tempname = '{}.{}.tmp'.format(self.filename, os.getpid())
+    try:
+        with open(tempname, 'wb' if self.file_format == 'pickle' else 'w') as fileobj:
+            self.dump(fileobj)
+        os.replace(tempname, self.filename)
+    except Exception:
+        if os.path.exists(tempname):
+            os.remove(tempname)
+        raise
+    if self.mode is not None:
+        os.chmod(self.filename, self.mode)
+
+
+swift_storage._Storage.sync = _sync_storage
 
 plugin = Plugin()
 
@@ -164,6 +185,7 @@ def get_video_item(item):
     if uname and mid:
         context_menu.append((f"转到UP: {uname}", f"Container.Update({plugin.url_for('user', id=mid)})"))
     context_menu.append(("查看推荐视频", f"Container.Update({plugin.url_for('related_videos', id=bvid)})"))
+    context_menu.append(("查看合集/分P", f"Container.Update({plugin.url_for('video_playlist', id=bvid)})"))
     if (not multi_key) or item[multi_key] == 1:
         context_menu.append(("仅播放音频", f"PlayMedia({plugin.url_for('video', id=bvid, cid=cid, ispgc='false', audio_only='true', title=title)})"))
         video = {
@@ -428,7 +450,7 @@ def qrcode_login():
         return
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         }
         res = requests.get('https://passport.bilibili.com/x/passport-login/web/qrcode/generate', headers=headers).json()
     except:
@@ -456,7 +478,7 @@ def qrcode_login():
 def polling_login_status(key):
     session = requests.Session()
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     }
     for i in range(50):
         try:
@@ -486,9 +508,54 @@ def polling_login_status(key):
     xbmc.executebuiltin('Action(Back)')
 
 
-def generate_mpd(dash):
+CDN_HOSTS = {
+    '1': 'upos-sz-mirroraliov.bilivideo.com',
+    '2': 'upos-hz-mirrorakam.akamaized.net',
+    '3': 'upos-sz-mirrorali.bilivideo.com',
+    '4': 'upos-sz-mirrorcos.bilivideo.com',
+    '5': 'upos-sz-mirrorhw.bilivideo.com',
+}
+
+
+def get_cdn_host():
+    option = getSetting('video_cdn')
+    if option == '6':
+        host = getSetting('video_cdn_custom').strip()
+        return urlsplit(host if '://' in host else '//' + host).netloc
+    return CDN_HOSTS.get(option, '')
+
+
+def is_pcdn_url(url):
+    'mcdn/pcdn 节点的链接格式不同, 不能替换域名'
+    host = urlsplit(url).hostname or ''
+    return 'mcdn.bilivideo' in host or host.endswith('szbdyd.com') or host.replace('.', '').isdigit()
+
+
+def get_stream_url(item):
+    '取视频流链接, 设置了 CDN 时优先选标准 upos 链接并替换域名'
+    url = item.get('baseUrl') or item.get('base_url') or item.get('url')
+    cdn_host = get_cdn_host()
+    if not cdn_host:
+        return url
+    backups = item.get('backupUrl') or item.get('backup_url') or []
+    for candidate in [url] + backups:
+        if candidate and not is_pcdn_url(candidate):
+            return urlunsplit(urlsplit(candidate)._replace(scheme='https', netloc=cdn_host))
+    return url
+
+
+def get_stream_urls(item):
+    '视频流的全部候选链接, 本地代理在连接中断时依次重试'
+    urls = [get_stream_url(item), item.get('baseUrl') or item.get('base_url') or item.get('url')]
+    urls += item.get('backupUrl') or item.get('backup_url') or []
+    return list(dict.fromkeys(url for url in urls if url))
+
+
+def generate_mpd(dash, stream_base):
+    '视频流经由本地代理 (http_server.py) 转发, 返回 mpd 和代理用的链接列表'
     videos = choose_resolution(dash['video'])
     audios = dash['audio']
+    streams = {}
 
     list = [
         '<?xml version="1.0" encoding="UTF-8"?>\n',
@@ -498,10 +565,11 @@ def generate_mpd(dash):
 
     # video
     list.append('\t\t<AdaptationSet mimeType="video/mp4" startWithSAP="1" scanType="progressive" segmentAlignment="true">\n')
-    for video in videos:
+    for i, video in enumerate(videos):
+        streams[f'video/{i}'] = get_stream_urls(video)
         list.extend([
             '\t\t\t<Representation bandwidth="', str(video['bandwidth']), '" codecs="', video['codecs'], '" frameRate="', video['frameRate'], '" height="', str(video['height']), '" width="', str(video['width']), '" id="', str(video['id']), '">\n',
-            '\t\t\t\t<BaseURL>', video['baseUrl'].replace('&', '&amp;'), '</BaseURL>\n',
+            '\t\t\t\t<BaseURL>', f'{stream_base}/video/{i}', '</BaseURL>\n',
             '\t\t\t\t<SegmentBase indexRange="', video['SegmentBase']['indexRange'], '">\n',
             '\t\t\t\t\t<Initialization range="' + video['SegmentBase']['Initialization'] + '"></Initialization>\n',
             '\t\t\t\t</SegmentBase>\n',
@@ -511,10 +579,11 @@ def generate_mpd(dash):
 
     # audio
     list.append('\t\t<AdaptationSet mimeType="audio/mp4" startWithSAP="1" segmentAlignment="true" lang="und">\n')
-    for audio in audios:
+    for i, audio in enumerate(audios):
+        streams[f'audio/{i}'] = get_stream_urls(audio)
         list.extend([
             '\t\t\t<Representation audioSamplingRate="44100" bandwidth="', str(audio['bandwidth']), '" codecs="', audio['codecs'], '" id="', str(audio['id']), '">\n',
-            '\t\t\t\t<BaseURL>', audio['baseUrl'].replace('&', '&amp;'), '</BaseURL>\n',
+            '\t\t\t\t<BaseURL>', f'{stream_base}/audio/{i}', '</BaseURL>\n',
             '\t\t\t\t<SegmentBase indexRange="', audio['SegmentBase']['indexRange'], '">\n',
             '\t\t\t\t\t<Initialization range="' + audio['SegmentBase']['Initialization'] + '"></Initialization>\n',
             '\t\t\t\t</SegmentBase>\n',
@@ -524,7 +593,7 @@ def generate_mpd(dash):
 
     list.append('\t</Period>\n</MPD>\n')
 
-    return ''.join(list)
+    return ''.join(list), streams
 
 def generate_ass(cid):
     basepath = xbmc.translatePath('special://temp/plugin.video.bili/')
@@ -535,7 +604,7 @@ def generate_ass(cid):
     if xbmcvfs.exists(assfile):
         return assfile
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     }
 
     try:
@@ -604,7 +673,7 @@ def get_uid():
 
 def post_data(url, data):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Referer': 'https://www.bilibili.com',
     }
     cookie = get_cookie()
@@ -620,7 +689,7 @@ def post_data(url, data):
 def raw_fetch_url(url):
     xbmc.log('url_get: ' + url)
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Referer': 'https://www.bilibili.com',
     }
     cookie = get_cookie()
@@ -697,6 +766,20 @@ def getWbiKeys():
     img_key = img_url.rsplit('/', 1)[1].split('.')[0]
     sub_key = sub_url.rsplit('/', 1)[1].split('.')[0]
     return img_key, sub_key
+
+
+def get_wbi_api_data(url, data):
+    '带 wbi 签名的请求; 签名含时间戳, 每次 url 都不同, 所以不走缓存'
+    try:
+        img_key, sub_key = getWbiKeys()
+    except (KeyError, TypeError):
+        return {'code': -1, 'message': '获取 wbi 签名失败'}
+    return raw_get_api_data(url, encWbi(dict(data), img_key, sub_key))
+
+
+def get_video_info(bvid):
+    '获取视频详情, 旧的 /x/web-interface/view 接口会被风控 (HTTP 412)'
+    return get_wbi_api_data('/x/web-interface/wbi/view', {'bvid': bvid})
 
 
 def get_categories():
@@ -1090,7 +1173,7 @@ def seasons_and_series_detail(id, uid, type, page):
     videos = []
     ps = 100
     if type == 'season':
-        url = '/x/polymer/space/seasons_archives_list'
+        url = '/x/polymer/web-space/seasons_archives_list'
         data = {
             'mid': uid,
             'season_id': id,
@@ -1109,6 +1192,7 @@ def seasons_and_series_detail(id, uid, type, page):
         }
     res = get_api_data(url, data)
     if res['code'] != 0:
+        notify_error(res)
         return videos
     list = res['data']['archives']
     for item in list:
@@ -1287,10 +1371,19 @@ def search_by_keyword(type, keyword, page):
     else:
         url = '/x/web-interface/wbi/search/type'
         data['search_type'] = type
-    res = get_api_data(url, data)
+    # 搜索接口需要 wbi 签名, 否则会被风控, 只返回 v_voucher 而没有 result
+    for _ in range(2):
+        res = get_wbi_api_data(url, data)
+        if res['code'] != 0 or 'v_voucher' not in res.get('data', {}):
+            break
     if res['code'] != 0:
+        notify_error(res)
         return videos
     if 'result' not in res['data']:
+        if 'v_voucher' in res['data']:
+            notify('提示', '搜索请求被拦截, 请稍后重试')
+        else:
+            notify('提示', '没有搜索结果')
         return videos
     list = res['data']['result']
     if type == 'all':
@@ -1299,7 +1392,7 @@ def search_by_keyword(type, keyword, page):
                 videos.extend(get_search_list(result['data']))
     else:
         if type == 'live':
-            lives = res['data']['result']['live_user']
+            lives = res['data']['result'].get('live_user') or []
             for item in lives:
                 uname = clear_text(item['uname'])
                 plot = f"UP: {uname}\tID: {item['uid']}\n房间号: {item['roomid']}\n\n"
@@ -1326,7 +1419,7 @@ def search_by_keyword(type, keyword, page):
                     'info_type': 'video'
                 }
                 videos.append(live)
-            lives = res['data']['result']['live_room']
+            lives = res['data']['result'].get('live_room') or []
             for item in lives:
                 uname = item['uname']
                 plot = f"UP: {uname}\tID: {item['uid']}\n房间号: {item['roomid']}\n\n"
@@ -1841,9 +1934,17 @@ def history(time):
     list = res['data']['list']
     for item in list:
         if item['videos'] >=1:
-            video = get_video_item(item)
+            # 直接播放看过的那一P, 并带上进度, 以便从上次的位置继续播放
+            video = get_video_item(dict(item, videos=1))
             if not video:
                 continue
+            if item['videos'] > 1 and item['history'].get('part'):
+                video['label'] += tag(f" P{item['history'].get('page', 1)} {item['history']['part']}", 'grey')
+            # progress 为 -1 或接近结尾表示已看完, 从头播放
+            progress = item.get('progress', 0)
+            if 0 < progress < item.get('duration', 0) - 10:
+                video['label'] += tag(f" (看到 {progress // 60}:{progress % 60:02d})", 'grey')
+                video['path'] = plugin.url_for('video', id=item['history']['bvid'], cid=item['history']['cid'], ispgc='false', audio_only='false', title=item['title'], start=progress)
         else:
             if item['history']['business'] == 'live':
                 if item['live_status'] == 1:
@@ -1952,11 +2053,80 @@ def bangumi(type, id):
 
 @plugin.route('/videopages/<id>/')
 def videopages(id):
-    videos = []
-    res = get_api_data('/x/web-interface/view', {'bvid': id})
-    data = res['data']
+    res = get_video_info(id)
     if res['code'] != 0:
-        return videos
+        notify_error(res)
+        return []
+    return get_page_items(res['data'])
+
+
+@plugin.route('/video_playlist/<id>/')
+def video_playlist(id):
+    res = get_video_info(id)
+    if res['code'] != 0:
+        notify_error(res)
+        return []
+    data = res['data']
+    videos = []
+    if len(data['pages']) > 1:
+        videos.append({'label': tag(f"分P ({len(data['pages'])})", 'yellow'), 'path': plugin.url_for('videopages', id=id)})
+        videos.extend(get_page_items(data))
+    if data.get('ugc_season'):
+        season = data['ugc_season']
+        videos.append({
+            'label': tag(f"合集: {season['title']} ({season['ep_count']})", 'yellow'),
+            'path': plugin.url_for('seasons_and_series_detail', uid=season['mid'], id=season['id'], type='season', page=1),
+        })
+        for section in season['sections']:
+            for ep in section['episodes']:
+                video = get_episode_item(ep)
+                if len(season['sections']) > 1:
+                    video['label'] = tag(f"[{section['title']}] ", 'grey') + video['label']
+                if ep['bvid'] == id:
+                    video['label'] = tag('▶ ', 'pink') + video['label']
+                videos.append(video)
+    if not videos:
+        notify('提示', '该视频没有合集或分P')
+    return videos
+
+
+def get_episode_item(ep):
+    arc = ep['arc']
+    title = ep['title']
+    context_menu = [
+        ("查看推荐视频", f"Container.Update({plugin.url_for('related_videos', id=ep['bvid'])})"),
+    ]
+    if len(ep.get('pages') or []) > 1:
+        return {
+            'label': parts_tag(len(ep['pages'])) + title,
+            'path': plugin.url_for('videopages', id=ep['bvid']),
+            'icon': arc['pic'],
+            'thumbnail': arc['pic'],
+            'context_menu': context_menu,
+            'info': {
+                'plot': arc.get('desc', '')
+            }
+        }
+    context_menu.append(("仅播放音频", f"PlayMedia({plugin.url_for('video', id=ep['bvid'], cid=ep['cid'], ispgc='false', audio_only='true', title=title)})"))
+    return {
+        'label': title,
+        'path': plugin.url_for('video', id=ep['bvid'], cid=ep['cid'], ispgc='false', audio_only='false', title=title),
+        'is_playable': True,
+        'icon': arc['pic'],
+        'thumbnail': arc['pic'],
+        'context_menu': context_menu,
+        'info': {
+            'mediatype': 'video',
+            'title': title,
+            'duration': arc['duration'],
+            'plot': arc.get('desc', '')
+        },
+        'info_type': 'video',
+    }
+
+
+def get_page_items(data):
+    videos = []
     for item in data['pages']:
         if 'first_frame' in item and item['first_frame']:
             pic = item['first_frame']
@@ -1982,14 +2152,23 @@ def videopages(id):
     return videos
 
 
-def report_history(bvid, cid):
-    data = {
+def get_start_offset():
+    '从历史记录进入时, 链接里带有上次的播放位置 (秒)'
+    start = plugin.request.args.get('start', ['0'])[0]
+    return int(start) if start.isdigit() else 0
+
+
+def handoff_to_player(bvid, cid):
+    '交给后台服务 (monitor.py): 跳转到上次的播放位置 (StartOffset 不生效时的后备), 并在播放过程中和停止时上报播放进度'
+    session = {
         'bvid': bvid,
-        'cid': cid,
-        'csrf': get_cookie_value('bili_jct')
+        'cid': str(cid),
+        'start': get_start_offset(),
+        'report': getSetting('report_history') == 'true',
+        'time': time.time(),
     }
-    res = post_data('https://api.bilibili.com/x/click-interface/web/heartbeat', data)
-    return res
+    xbmc.log(f"plugin.video.bili: play {bvid} cid={cid} start={session['start']} report={session['report']}")
+    xbmcgui.Window(10000).setProperty('plugin.video.bili.playing', json.dumps(session))
 
 
 @plugin.route('/video/<id>/<cid>/<ispgc>/<audio_only>/<title>/')
@@ -1999,11 +2178,11 @@ def video(id, cid, ispgc, audio_only, title):
     video_url = ''
     enable_dash = getSetting('enable_dash') == 'true'
     if cid == '0':
-        res = get_api_data('/x/web-interface/view', {'bvid': id})
-
-        data = res['data']
+        res = get_video_info(id)
         if res['code'] != 0:
+            notify_error(res)
             return
+        data = res['data']
 
         cid = data['pages'][0]['cid']
         if 'redirect_url' in data and 'bangumi/play/ep' in data['redirect_url']:
@@ -2046,7 +2225,7 @@ def video(id, cid, ispgc, audio_only, title):
 
     if 'dash' in data:
         if audio_only:
-            video_url = data['dash']['audio'][0]['baseUrl'] + '|Referer=https://www.bilibili.com'
+            video_url = get_stream_url(data['dash']['audio'][0]) + '|Referer=https://www.bilibili.com'
             video_url = {
                 'label': title,
                 'path': video_url
@@ -2054,18 +2233,22 @@ def video(id, cid, ispgc, audio_only, title):
             plugin.set_resolved_url(video_url)
             return
         else:
-            mpd = generate_mpd(data['dash'])
+            ip_address = '127.0.0.1'
+            port = getSetting('server_port')
+            mpd, streams = generate_mpd(data['dash'], 'http://{}:{}/stream/{}'.format(ip_address, port, cid))
             success = None
             basepath = 'special://temp/plugin.video.bili/'
             if not make_dirs(basepath):
+                return
+            with xbmcvfs.File('{}{}.json'.format(basepath, cid), 'w') as streams_file:
+                success = streams_file.write(json.dumps(streams))
+            if not success:
                 return
             filepath = '{}{}.mpd'.format(basepath, cid)
             with xbmcvfs.File(filepath, 'w') as mpd_file:
                 success = mpd_file.write(mpd)
             if not success:
                 return
-            ip_address = '127.0.0.1'
-            port = getSetting('server_port')
             video_url = {
                 'path': 'http://{}:{}/{}.mpd'.format(ip_address, port, cid),
                 'properties': {
@@ -2076,11 +2259,18 @@ def video(id, cid, ispgc, audio_only, title):
                 }
             }
     elif 'durl' in data:
-        video_url = data['durl'][0]['url']
+        video_url = get_stream_url(data['durl'][0])
         if video_url:
             video_url += '|Referer=https://www.bilibili.com'
     else:
         video_url = ''
+
+    start = get_start_offset()
+    if video_url and start > 0:
+        # Kodi 内置的 StartOffset 属性: 从指定的秒数开始播放
+        if isinstance(video_url, str):
+            video_url = {'path': video_url}
+        video_url.setdefault('properties', {})['StartOffset'] = str(start)
 
     if video_url and getSetting('enable_danmaku') == 'true':
         ass = generate_ass(cid)
@@ -2088,12 +2278,12 @@ def video(id, cid, ispgc, audio_only, title):
             player = xbmc.Player()
             if player.isPlaying():
                 player.stop()
-            if video_url and (getSetting('report_history') == 'true'):
-                report_history(id, cid)
+            if video_url:
+                handoff_to_player(id, cid)
             plugin.set_resolved_url(video_url, ass)
             return
-    if video_url and (getSetting('report_history') == 'true'):
-        report_history(id, cid)
+    if video_url:
+        handoff_to_player(id, cid)
     plugin.set_resolved_url(video_url)
 
 

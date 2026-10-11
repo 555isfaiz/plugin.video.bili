@@ -139,6 +139,46 @@ msgctxt "#30038"
 msgid "AVC"
 msgstr ""
 
+msgctxt "#30060"
+msgid "Video CDN"
+msgstr ""
+
+msgctxt "#30061"
+msgid "Default (no change)"
+msgstr ""
+
+msgctxt "#30062"
+msgid "Alibaba Cloud overseas"
+msgstr ""
+
+msgctxt "#30063"
+msgid "Akamai overseas"
+msgstr ""
+
+msgctxt "#30064"
+msgid "Alibaba Cloud"
+msgstr ""
+
+msgctxt "#30065"
+msgid "Tencent Cloud COS"
+msgstr ""
+
+msgctxt "#30066"
+msgid "Huawei Cloud"
+msgstr ""
+
+msgctxt "#30067"
+msgid "Custom"
+msgstr ""
+
+msgctxt "#30068"
+msgid "Custom CDN host"
+msgstr ""
+
+msgctxt "#30069"
+msgid "Replace the host of video links. Only standard upos links are replaced, other links are kept as is."
+msgstr ""
+
 msgctxt "#30040"
 msgid "Live Resolution"
 msgstr ""

@@ -171,6 +171,39 @@
                         </dependency>
                     </dependencies>
 				</setting>
+				<setting id="video_cdn" type="integer" label="30060" help="30069">
+					<level>0</level>
+					<default>0</default>
+					<constraints>
+						<options>
+							<option label="30061">0</option>
+							<option label="30062">1</option>
+							<option label="30063">2</option>
+							<option label="30064">3</option>
+							<option label="30065">4</option>
+							<option label="30066">5</option>
+							<option label="30067">6</option>
+						</options>
+					</constraints>
+					<control type="list" format="string">
+						<heading>30060</heading>
+					</control>
+				</setting>
+				<setting id="video_cdn_custom" type="string" label="30068" help="30069">
+					<level>0</level>
+					<default></default>
+					<constraints>
+						<allowempty>true</allowempty>
+					</constraints>
+					<control type="edit" format="string">
+						<heading>30068</heading>
+					</control>
+					<dependencies>
+						<dependency type="enable">
+							<condition operator="is" setting="video_cdn">6</condition>
+						</dependency>
+					</dependencies>
+				</setting>
 			</group>
 			<group id="5" label="30040">
 				<setting id="live_resolution" type="integer" label="30041" help="">

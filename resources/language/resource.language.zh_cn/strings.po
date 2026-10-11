@@ -139,6 +139,46 @@ msgctxt "#30038"
 msgid "AVC"
 msgstr "AVC"
 
+msgctxt "#30060"
+msgid "Video CDN"
+msgstr "视频CDN"
+
+msgctxt "#30061"
+msgid "Default (no change)"
+msgstr "默认 (不替换)"
+
+msgctxt "#30062"
+msgid "Alibaba Cloud overseas"
+msgstr "阿里云海外"
+
+msgctxt "#30063"
+msgid "Akamai overseas"
+msgstr "Akamai 海外"
+
+msgctxt "#30064"
+msgid "Alibaba Cloud"
+msgstr "阿里云"
+
+msgctxt "#30065"
+msgid "Tencent Cloud COS"
+msgstr "腾讯云"
+
+msgctxt "#30066"
+msgid "Huawei Cloud"
+msgstr "华为云"
+
+msgctxt "#30067"
+msgid "Custom"
+msgstr "自定义"
+
+msgctxt "#30068"
+msgid "Custom CDN host"
+msgstr "自定义CDN域名"
+
+msgctxt "#30069"
+msgid "Replace the host of video links. Only standard upos links are replaced, other links are kept as is."
+msgstr "替换视频链接的域名, 只替换标准的 upos 链接, 其他链接保持不变"
+
 msgctxt "#30040"
 msgid "Live Resolution"
 msgstr "直播清晰度"
