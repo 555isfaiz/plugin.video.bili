@@ -330,3 +330,11 @@ msgstr "安装 inputstream.adaptive 插件"
 msgctxt "#30132"
 msgid "This feature requires the inputstream.adaptive plugin. When disabled, the maximum video resolution is limited to 720P."
 msgstr "此功能需要安装 inputstream.adaptive 插件。禁用后，视频最高分辨率将限制为 720P"
+
+msgctxt "#30070"
+msgid "Preload buffer (MB)"
+msgstr "视频预加载缓存 (MB)"
+
+msgctxt "#30071"
+msgid "How much video to download ahead of the playback position. Larger values reduce buffering but use more memory (audio uses an extra 1/4)."
+msgstr "提前下载播放位置之后的视频数据, 越大越不容易卡顿, 但占用更多内存 (音频另外占用 1/4)"

@@ -45,6 +45,26 @@ class BilibiliMonitor(xbmc.Monitor):
             self.httpd_thread = None
             self.httpd = None
 
+    def onNotification(self, sender, method, data):
+        # 插件 (addon.py) 生成了合集/分P 播放列表, 让这次解析失败后由这里从当前视频开始播放列表
+        if sender != self.addon_id or not method.endswith('play_playlist'):
+            return
+        try:
+            position = int(json.loads(data)['position'])
+        except (ValueError, KeyError, TypeError):
+            return
+        threading.Thread(target=self.play_playlist, args=(position,), daemon=True).start()
+
+    def play_playlist(self, position):
+        # 等插件那边失败的解析处理完, 否则新开始的播放可能被它中断
+        if self.waitForAbort(0.5):
+            return
+        playlist = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
+        if position >= playlist.size():
+            return
+        xbmc.log(f'plugin.video.bili: playing playlist of {playlist.size()} items from {position}', xbmc.LOGINFO)
+        xbmc.Player().play(playlist, startpos=position)
+
     def restart_httpd(self):
         self.shutdown_httpd()
         self.start_httpd()
@@ -88,16 +108,21 @@ class BilibiliPlayer(xbmc.Player):
 
     def onAVStarted(self):
         session = self.take_handoff()
-        xbmc.log(f'plugin.video.bili: playback started, session={session}')
+        xbmc.log(f'plugin.video.bili: playback started, session={session}', xbmc.LOGINFO)
         with self.lock:
             self.session = session
             self.played_time = 0
             self.last_report = time.time()
+        if session and session.get('subtitles'):
+            try:
+                self.setSubtitles(session['subtitles'])
+            except RuntimeError:
+                pass
         if session and session['start'] > 0:
             try:
                 current = self.getTime()
                 if current < session['start'] - 5:
-                    xbmc.log(f"plugin.video.bili: at {current:.0f}s, seeking to {session['start']}s")
+                    xbmc.log(f"plugin.video.bili: at {current:.0f}s, seeking to {session['start']}s", xbmc.LOGINFO)
                     self.seekTime(session['start'])
             except RuntimeError:
                 pass
@@ -112,13 +137,13 @@ class BilibiliPlayer(xbmc.Player):
         except ValueError:
             return None
         if time.time() - session.get('time', 0) > self.HANDOFF_TIMEOUT:
-            xbmc.log('plugin.video.bili: ignoring stale playback handoff')
+            xbmc.log('plugin.video.bili: ignoring stale playback handoff', xbmc.LOGINFO)
             return None
         try:
             # 确认正在播放的就是插件刚解析的那个视频 (mpd 文件名和视频链接里都带 cid)
             playing_file = self.getPlayingFile()
             if not self.isPlayingVideo() or session['cid'] not in playing_file:
-                xbmc.log(f"plugin.video.bili: ignoring handoff for cid {session['cid']}, playing {playing_file[:100]}")
+                xbmc.log(f"plugin.video.bili: ignoring handoff for cid {session['cid']}, playing {playing_file[:100]}", xbmc.LOGINFO)
                 return None
         except RuntimeError:
             return None
@@ -183,7 +208,7 @@ class BilibiliPlayer(xbmc.Player):
         if 'bili_jct=' in cookie:
             csrf = cookie.split('bili_jct=')[1].split(';')[0]
         if not csrf:
-            xbmc.log('plugin.video.bili: not logged in, history not reported')
+            xbmc.log('plugin.video.bili: not logged in, history not reported', xbmc.LOGINFO)
             return
         data = {
             'bvid': session['bvid'],
@@ -198,6 +223,6 @@ class BilibiliPlayer(xbmc.Player):
         }
         try:
             res = requests.post('https://api.bilibili.com/x/click-interface/web/heartbeat', data=data, headers=headers, timeout=10).json()
-            xbmc.log(f"plugin.video.bili: report history {session['bvid']} at {played_time}s -> {res.get('code')} {res.get('message')}")
+            xbmc.log(f"plugin.video.bili: report history {session['bvid']} at {played_time}s -> {res.get('code')} {res.get('message')}", xbmc.LOGINFO)
         except Exception as e:
-            xbmc.log(f'plugin.video.bili: report history failed: {e}')
+            xbmc.log(f'plugin.video.bili: report history failed: {e}', xbmc.LOGINFO)

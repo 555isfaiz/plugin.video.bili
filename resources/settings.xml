@@ -120,6 +120,21 @@
                         </dependency>
                     </dependencies>
 				</setting>
+				<setting id="stream_buffer_size" type="integer" label="30070" help="30071">
+					<level>0</level>
+					<default>64</default>
+					<constraints>
+						<minimum>16</minimum>
+						<step>16</step>
+						<maximum>512</maximum>
+					</constraints>
+					<control type="spinner" format="integer"/>
+					<dependencies>
+						<dependency type="enable">
+							<condition operator="is" setting="enable_dash">true</condition>
+						</dependency>
+					</dependencies>
+				</setting>
 				<setting id="server_port" type="integer" label="30012" help="">
 					<level>0</level>
 					<default>54321</default>

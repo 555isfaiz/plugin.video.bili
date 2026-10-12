@@ -531,24 +531,33 @@ def is_pcdn_url(url):
     return 'mcdn.bilivideo' in host or host.endswith('szbdyd.com') or host.replace('.', '').isdigit()
 
 
+def remove_bandwidth_limit(url):
+    # 链接里的 bw 参数会让服务器把每个连接限速到接近视频码率, 稍有波动就会卡顿.
+    # 该参数不在签名内, 去掉后返回的数据完全相同. 直接处理原始字符串, 保证其他参数原样不变.
+    if not url or '?' not in url:
+        return url
+    base, query = url.split('?', 1)
+    return base + '?' + '&'.join(part for part in query.split('&') if not part.startswith('bw='))
+
+
 def get_stream_url(item):
     '取视频流链接, 设置了 CDN 时优先选标准 upos 链接并替换域名'
     url = item.get('baseUrl') or item.get('base_url') or item.get('url')
     cdn_host = get_cdn_host()
-    if not cdn_host:
-        return url
-    backups = item.get('backupUrl') or item.get('backup_url') or []
-    for candidate in [url] + backups:
-        if candidate and not is_pcdn_url(candidate):
-            return urlunsplit(urlsplit(candidate)._replace(scheme='https', netloc=cdn_host))
-    return url
+    if cdn_host:
+        backups = item.get('backupUrl') or item.get('backup_url') or []
+        for candidate in [url] + backups:
+            if candidate and not is_pcdn_url(candidate):
+                url = urlunsplit(urlsplit(candidate)._replace(scheme='https', netloc=cdn_host))
+                break
+    return remove_bandwidth_limit(url)
 
 
 def get_stream_urls(item):
     '视频流的全部候选链接, 本地代理在连接中断时依次重试'
     urls = [get_stream_url(item), item.get('baseUrl') or item.get('base_url') or item.get('url')]
     urls += item.get('backupUrl') or item.get('backup_url') or []
-    return list(dict.fromkeys(url for url in urls if url))
+    return list(dict.fromkeys(remove_bandwidth_limit(url) for url in urls if url))
 
 
 def generate_mpd(dash, stream_base):
@@ -1557,21 +1566,24 @@ def web_dynamic(page, offset):
         data['offset'] = offset
     res = get_api_data(url, data)
     if res['code'] != 0:
+        notify_error(res)
         return videos
-    list = res['data']['items']
-    offset = res['data']['offset']
+    list = res['data'].get('items') or []
+    offset = res['data'].get('offset', '')
     for d in list:
-        major = d['modules']['module_dynamic']['major']
+        module_dynamic = d.get('modules', {}).get('module_dynamic') or {}
+        major = module_dynamic.get('major')
         if not major:
             continue
         author = d['modules']['module_author']['name']
         mid = d['modules']['module_author']['mid']
-        if 'archive' in major:
+        # major 里会带上所有类型的键, 不相关的值为 None, 所以要判断值而不是键
+        if major.get('archive'):
             item = major['archive']
             item['author'] = author
             item['mid'] = mid
             video = get_video_item(item)
-        elif 'live_rcmd' in major:
+        elif major.get('live_rcmd'):
             content = major['live_rcmd']['content']
             item = json.loads(content)
             if item['live_play_info']['live_status'] == 1:
@@ -1600,7 +1612,7 @@ def web_dynamic(page, offset):
         else:
             continue
         videos.append(video)
-    if res['data']['has_more']:
+    if res['data'].get('has_more'):
         videos.append({
             'label': tag('下一页', 'yellow'),
             'path': plugin.url_for('web_dynamic', page=int(page)+1, offset=offset)
@@ -1767,53 +1779,35 @@ def home(page):
     return videos
 
 
+# 新版分区 [名称, 分区 id], 旧分区 (rid) 的 /x/web-interface/dynamic/region 接口已失效 (-404).
+# 鬼畜 (1007), 小剧场 (1021), vlog (1029) 的推荐接口没有内容 (62013), 不列出
+VIDEO_REGIONS = [['二次元', 1005], ['游戏', 1008], ['音乐', 1003], ['舞蹈', 1004], ['影视', 1001], ['娱乐', 1002], ['知识', 1010], ['人工智能', 1011], ['科技数码', 1012], ['资讯', 1009], ['美食', 1020], ['汽车', 1013], ['时尚美妆', 1014], ['体育运动', 1018], ['健身', 1017], ['动物', 1024], ['绘画', 1006], ['手工', 1019], ['家装房产', 1015], ['户外潮流', 1016], ['旅游出行', 1022], ['三农', 1023], ['亲子', 1025], ['医疗保健', 1026], ['情感', 1027], ['神秘学', 1028], ['生活兴趣', 1030], ['生活经验', 1031], ['其他', 1032]]
+
+
 @plugin.route('/dynamic_list/')
 def dynamic_list():
-    list = [['番剧', 13], ['- 连载动画', 33], ['- 完结动画', 32], ['- 资讯', 51], ['- 官方延伸', 152], ['电影', 23], ['国创', 167], ['- 国产动画', 153], ['- 国产原创相关', 168], ['- 布袋戏', 169], ['- 动态漫·广播剧', 195], ['- 资讯', 51], ['电视剧', 11], ['纪录片', 177], ['动画', 1], ['- MAD·AMV', 24], ['- MMD·3D', 25], ['- 短片·手书·配音', 47], ['- 手办·模玩', 210], ['- 特摄', 86], ['- 动漫杂谈', 253], ['- 综合', 27], ['游戏', 4], ['- 单机游戏', 17], ['- 电 子竞技', 171], ['- 手机游戏', 172], ['- 网络游戏', 65], ['- 桌游棋牌', 173], ['- GMV', 121], ['- 音游', 136], ['- Mugen', 19], ['鬼畜', 119], ['- 鬼畜 调教', 22], ['- 音MAD', 26], ['- 人力VOCALOID', 126], ['- 鬼畜剧场', 216], ['- 教程演示', 127], ['音乐', 3], ['- 原创音乐', 28], ['- 翻唱', 31], ['- 演奏', 59], ['- VOCALOID·UTAU', 30], ['- 音乐现场', 29], ['- MV', 193], ['- 乐评盘点', 243], ['- 音乐教学', 244], ['- 音乐综合', 130], ['舞蹈', 129], ['- 宅舞', 20], ['- 街舞', 198], ['- 明星舞蹈', 199], ['- 中国舞', 200], ['- 舞蹈综合', 154], ['- 舞蹈教程', 156], ['影视', 181], ['- 影视杂谈', 182], ['- 影视剪辑', 183], ['- 小剧场', 85], ['- 预告·资讯', 184], ['娱乐', 5], ['- 综艺', 71], ['- 娱乐杂谈', 241], ['- 粉丝创作', 242], ['- 明星综合', 137], ['知识', 36], ['- 科学科普', 201], ['- 社科·法律·心理', 124], ['- 人文历史', 228], ['- 财经商业', 207], ['- 校园学习', 208], ['- 职业职场', 209], ['- 设计·创意', 229], ['- 野生技能协会', 122], ['科技', 188], ['- 数码', 95], ['- 软件应用', 230], ['- 计算机技术', 231], ['- 科工机械', 232], ['资讯', 51], ['- 热点', 203], ['- 环球', 204], ['- 社会', 205], ['- 综合', 27], ['美食', 211], ['- 美食制作', 76], ['- 美食侦探', 212], ['- 美食测评', 213], ['- 田 园美食', 214], ['- 美食记录', 215], ['生活', 160], ['- 搞笑', 138], ['- 亲子', 254], ['- 出行', 250], ['- 三农', 251], ['- 家居房产', 239], ['- 手工', 161], ['- 绘画', 162], ['- 日常', 21], ['汽车', 223], ['- 赛车', 245], ['- 改装玩车', 246], ['- 新能源车', 246], ['- 房车', 248], ['- 摩托车', 240], ['- 购车攻略', 227], ['- 汽车生活', 176], ['时尚', 155], ['- 美妆护肤', 157], ['- 仿妆cos', 252], ['- 穿搭', 158], ['- 时尚潮流', 159], ['运动', 234], ['- 篮球', 235], ['- 足球', 249], ['- 健身', 164], ['- 竞技体育', 236], ['- 运动文化', 237], ['- 运动综合', 238], ['动物圈', 217], ['- 喵星人', 218], ['- 汪星人', 219], ['- 小宠异宠', 222], ['- 野生动物', 221], ['- 动物二创', 220], ['- 动物综合', 75], ['搞笑', 138], ['单机游戏', 17]]
-    items = []
-    for d in list:
-        if d[0].startswith('- '):
-            continue
-        items.append({
-            'label':d[0],
-            'path': plugin.url_for('dynamic', id=d[1], page=1)
-        })
-    return items
+    return [{
+        'label': r[0],
+        'path': plugin.url_for('dynamic', id=r[1], page=1)
+    } for r in VIDEO_REGIONS]
 
 
 @plugin.route('/dynamic/<id>/<page>/')
 def dynamic(id, page):
     videos = []
-    ps = 50
-    res = get_api_data('/x/web-interface/dynamic/region', {'pn':page, 'ps':ps, 'rid':id})
+    ps = 20
+    res = get_api_data('/x/web-interface/region/feed/rcmd', {'display_id': page, 'request_cnt': ps, 'from_region': id})
     if res['code'] != 0:
+        notify_error(res)
         return videos
-    list = res['data']['archives']
+    list = res['data'].get('archives') or []
     for item in list:
-        if 'redirect_url' in item and 'www.bilibili.com/bangumi/play' in item['redirect_url']:
-            plot = parse_plot(item)
-            bangumi_id = item['redirect_url'].split('/')[-1].split('?')[0]
-            if bangumi_id.startswith('ep'):
-                type = 'ep_id'
-            else:
-                type = 'season_id'
-            bangumi_id = bangumi_id[2:]
-            video = {
-                'label': tag('【' + item['tname'] +  '】', 'pink') + item['title'],
-                'path': plugin.url_for('bangumi', type=type, id=bangumi_id),
-                'icon': item['pic'],
-                'thumbnail': item['pic'],
-                'info': {
-                    'plot': plot
-                },
-                'info_type': 'video'
-            }
-        else:
-            video = get_video_item(item)
-            if not video:
-                continue
-        videos.append(video)
-    if int(page) * ps < res['data']['page']['count']:
+        if isinstance(item.get('author'), dict):
+            item['owner'] = item.pop('author')
+        video = get_video_item(item)
+        if video:
+            videos.append(video)
+    if len(list) >= ps:
         videos.append({
             'label': tag('下一页', 'yellow'),
             'path': plugin.url_for('dynamic', id=id, page=int(page) + 1)
@@ -2158,16 +2152,71 @@ def get_start_offset():
     return int(start) if start.isdigit() else 0
 
 
-def handoff_to_player(bvid, cid):
-    '交给后台服务 (monitor.py): 跳转到上次的播放位置 (StartOffset 不生效时的后备), 并在播放过程中和停止时上报播放进度'
+def get_playlist_entries(data):
+    '视频所在的合集 (每个视频的每个分P) 或分P列表, 用来生成 Kodi 播放列表'
+    entries = []
+    season = data.get('ugc_season')
+    if season:
+        for section in season['sections']:
+            for ep in section['episodes']:
+                pages = ep.get('pages') or [{'cid': ep['cid'], 'part': ep['title']}]
+                for page in pages:
+                    title = ep['title'] if len(pages) == 1 else f"{ep['title']} - {page['part']}"
+                    entries.append({'bvid': ep['bvid'], 'cid': str(page['cid']), 'title': title, 'pic': ep['arc']['pic']})
+    elif len(data.get('pages') or []) > 1:
+        for page in data['pages']:
+            entries.append({'bvid': data['bvid'], 'cid': str(page['cid']), 'title': page['part'], 'pic': page.get('first_frame') or data['pic']})
+    return entries
+
+
+def is_playing_from_playlist(bvid, cid):
+    '是否由 Kodi 的视频播放列表发起 (OSD 上的上一个/下一个, 或者自动播放下一个)'
+    playlist = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
+    position = playlist.getposition()
+    if position < 0 or position >= playlist.size():
+        return False
+    return f'/video/{bvid}/{cid}/' in playlist[position].getPath()
+
+
+def start_playlist(data, bvid, cid):
+    '''从列表直接点击播放时, Kodi 不使用播放列表, OSD 上的上一个/下一个按钮不起作用.
+    这时把合集/分P放进视频播放列表, 交给后台服务从当前视频开始播放列表. 返回 True 表示已经交出去了'''
+    entries = get_playlist_entries(data)
+    position = next((i for i, e in enumerate(entries) if e['bvid'] == bvid and e['cid'] == str(cid)), -1)
+    if len(entries) < 2 or position < 0:
+        return False
+    playlist = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
+    playlist.clear()
+    start = get_start_offset()
+    for i, e in enumerate(entries):
+        args = {'start': start} if i == position and start > 0 else {}
+        url = plugin.url_for('video', id=e['bvid'], cid=e['cid'], ispgc='false', audio_only='false', title=e['title'], **args)
+        item = xbmcgui.ListItem(e['title'])
+        item.setArt({'icon': e['pic'], 'thumb': e['pic']})
+        item.setInfo('video', {'mediatype': 'video', 'title': e['title']})
+        item.setProperty('IsPlayable', 'true')
+        playlist.add(url, item)
+    xbmc.log(f"plugin.video.bili: start playlist of {len(entries)} items at {position} ({bvid} cid={cid})", xbmc.LOGINFO)
+    # 本次解析返回失败, 由后台服务等这次播放结束后再启动播放列表, 列表里的当前项会再次进入这里正常解析
+    xbmc.executeJSONRPC(json.dumps({
+        'jsonrpc': '2.0', 'id': 1, 'method': 'JSONRPC.NotifyAll',
+        'params': {'sender': 'plugin.video.bili', 'message': 'play_playlist', 'data': {'position': position}},
+    }))
+    return True
+
+
+def handoff_to_player(bvid, cid, subtitles=None):
+    '''交给后台服务 (monitor.py): 加载弹幕字幕, 跳转到上次的播放位置 (StartOffset 不生效时的后备), 并在播放过程中和停止时上报播放进度.
+    字幕要等新视频开始播放后再加载, 在播放列表里切换视频时旧视频还在播放, 这里直接加载会加到旧视频上'''
     session = {
         'bvid': bvid,
         'cid': str(cid),
         'start': get_start_offset(),
         'report': getSetting('report_history') == 'true',
+        'subtitles': subtitles,
         'time': time.time(),
     }
-    xbmc.log(f"plugin.video.bili: play {bvid} cid={cid} start={session['start']} report={session['report']}")
+    xbmc.log(f"plugin.video.bili: play {bvid} cid={cid} start={session['start']} report={session['report']}", xbmc.LOGINFO)
     xbmcgui.Window(10000).setProperty('plugin.video.bili.playing', json.dumps(session))
 
 
@@ -2177,18 +2226,29 @@ def video(id, cid, ispgc, audio_only, title):
     audio_only = audio_only == 'true'
     video_url = ''
     enable_dash = getSetting('enable_dash') == 'true'
-    if cid == '0':
+    # 从播放列表进来的不再重新生成播放列表, 否则 OSD 切换视频时列表会被清空
+    from_playlist = is_playing_from_playlist(id, cid)
+    want_playlist = not (ispgc or audio_only or from_playlist)
+    if cid == '0' or want_playlist:
         res = get_video_info(id)
         if res['code'] != 0:
-            notify_error(res)
-            return
+            if cid == '0':
+                notify_error(res)
+                return
+            # 只是拿不到合集信息, 照常播放当前视频
+            res = {'data': {}}
+            want_playlist = False
         data = res['data']
 
-        cid = data['pages'][0]['cid']
-        if 'redirect_url' in data and 'bangumi/play/ep' in data['redirect_url']:
-            ispgc = True
-        else:
-            ispgc = False
+        if cid == '0':
+            cid = data['pages'][0]['cid']
+            if 'redirect_url' in data and 'bangumi/play/ep' in data['redirect_url']:
+                ispgc = True
+            else:
+                ispgc = False
+        if want_playlist and not ispgc and start_playlist(data, id, cid):
+            plugin.set_resolved_url(None)
+            return
 
     if ispgc:
         url = '/pgc/player/web/playurl'
@@ -2241,7 +2301,10 @@ def video(id, cid, ispgc, audio_only, title):
             if not make_dirs(basepath):
                 return
             with xbmcvfs.File('{}{}.json'.format(basepath, cid), 'w') as streams_file:
-                success = streams_file.write(json.dumps(streams))
+                success = streams_file.write(json.dumps({
+                    'buffer_mb': int(getSetting('stream_buffer_size')) if getSetting('stream_buffer_size').isdigit() else 64,
+                    'streams': streams,
+                }))
             if not success:
                 return
             filepath = '{}{}.mpd'.format(basepath, cid)
@@ -2272,18 +2335,9 @@ def video(id, cid, ispgc, audio_only, title):
             video_url = {'path': video_url}
         video_url.setdefault('properties', {})['StartOffset'] = str(start)
 
-    if video_url and getSetting('enable_danmaku') == 'true':
-        ass = generate_ass(cid)
-        if ass:
-            player = xbmc.Player()
-            if player.isPlaying():
-                player.stop()
-            if video_url:
-                handoff_to_player(id, cid)
-            plugin.set_resolved_url(video_url, ass)
-            return
     if video_url:
-        handoff_to_player(id, cid)
+        ass = generate_ass(cid) if getSetting('enable_danmaku') == 'true' else None
+        handoff_to_player(id, cid, ass)
     plugin.set_resolved_url(video_url)
 
 

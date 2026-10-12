@@ -330,3 +330,11 @@ msgstr ""
 msgctxt "#30132"
 msgid "This feature requires the inputstream.adaptive plugin. When disabled, the maximum video resolution is limited to 720P."
 msgstr ""
+
+msgctxt "#30070"
+msgid "Preload buffer (MB)"
+msgstr ""
+
+msgctxt "#30071"
+msgid "How much video to download ahead of the playback position. Larger values reduce buffering but use more memory (audio uses an extra 1/4)."
+msgstr ""
